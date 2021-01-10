@@ -1,0 +1,272 @@
+
+
+```{r}
+library(tidyverse)
+library(tidytext)
+
+options(scipen = 9999)
+```
+
+```{r}
+computing <- read_csv("data/computing-data-processing/objects.csv") 
+space <- read_csv("data/space/objects.csv")
+
+objects <- bind_rows(list('computing' = computing, 'space' = space), .id = 'category')
+
+objects
+
+```
+
+```{r}
+object_descriptions <- objects %>% 
+  unnest_tokens('word', description) %>% 
+  anti_join(stop_words, by = 'word') %>% 
+  filter(!str_detect(word, "[0-9]"))
+
+object_descriptions
+```
+
+```{r}
+object_descriptions %>% 
+  add_count(id) %>% 
+  ggplot() +
+  geom_density(aes(n))
+
+```
+
+```{r}
+object_descriptions <- object_descriptions %>% 
+  add_count(id) %>% 
+  filter(n >= 5) %>% 
+  select(-n)
+
+object_descriptions %>% distinct(id, category) %>% count(category)
+```
+
+```{r}
+library(widyr)
+
+word_pairs <- object_descriptions %>% 
+  group_by(category) %>% 
+  nest() %>% 
+  mutate(pairs = map(data, pairwise_count, word, id, sort = TRUE, upper = FALSE)) %>% 
+  select(-data) %>% 
+  unnest(pairs) %>% 
+  ungroup()
+
+```
+
+```{r}
+library(ggraph)
+library(igraph)
+
+set.seed(42)
+
+word_pairs %>% 
+  filter(category == 'computing', n > 30) %>%
+  select(-category) %>% 
+  graph_from_data_frame() %>% 
+  ggraph(layout = 'fr') +
+  geom_edge_link(aes(edge_alpha = n, edge_width = n), edge_colour = "cyan4") +
+  geom_node_point() +
+  geom_node_text(aes(label = name), vjust = 1, hjust = 1) + 
+  theme_void()
+
+word_pairs %>% 
+  filter(category == 'space', n > 20) %>%
+  select(-category) %>% 
+  graph_from_data_frame() %>% 
+  ggraph(layout = 'fr') +
+  geom_edge_link(aes(edge_alpha = n, edge_width = n), edge_colour = "hotpink") +
+  geom_node_point() +
+  geom_node_text(aes(label = name), vjust = 1, hjust = 1) + 
+  theme_void()
+
+```
+
+```{r}
+keywords <- object_descriptions %>% 
+  group_by(category) %>% 
+  add_count(word) %>% 
+  filter(n > 20) %>% 
+  ungroup()
+
+word_cors <- keywords %>% 
+  group_by(category) %>% 
+  nest() %>% 
+  mutate(cor = map(data, pairwise_cor, word, id, sort = TRUE, upper = FALSE)) %>% 
+  select(-data) %>% 
+  unnest(cor) %>% 
+  ungroup()
+
+word_cors %>% 
+  filter(category == 'computing', correlation > 0.5) %>%
+  select(-category) %>% 
+  graph_from_data_frame()  %>% 
+  ggraph(layout = 'fr') +
+  geom_edge_link(aes(edge_alpha = correlation, edge_width = correlation), edge_colour = "cyan4") +
+  geom_node_point() +
+  geom_node_text(aes(label = name), vjust = 1, hjust = 1) + 
+  theme_void()
+
+word_cors %>% 
+  filter(category == 'space', correlation > 0.2) %>%
+  select(-category) %>% 
+  graph_from_data_frame()  %>% 
+  ggraph(layout = 'fr') +
+  geom_edge_link(aes(edge_alpha = correlation, edge_width = correlation), edge_colour = "hotpink") +
+  geom_node_point() +
+  geom_node_text(aes(label = name), vjust = 1, hjust = 1) + 
+  theme_void()
+
+```
+
+```{r}
+library(tidylo)
+
+objects_log_odds <- object_descriptions %>% 
+  count(category, word) %>% 
+  bind_log_odds(category, word, n) %>% 
+  arrange(desc(log_odds_weighted)) 
+
+objects_log_odds %>% 
+  group_by(category) %>% 
+  slice_max(log_odds_weighted, n = 20)  %>% 
+  mutate(word = fct_reorder(word, log_odds_weighted)) %>% 
+  ggplot(aes(log_odds_weighted, word, fill = category)) + 
+  geom_col() + 
+  facet_wrap(~category, scales = "free")
+
+```
+
+```{r}
+
+```
+
+
+```{r}
+library(tidymodels)
+set.seed(42)
+
+objects_split <- initial_split(objects, strata = category)
+objects_training <- training(objects_split)
+objects_testing <- testing(objects_split)
+```
+
+```{r}
+set.seed(42)
+objects_folds <- vfold_cv(objects_training, strata = category)
+objects_folds
+
+```
+
+```{r}
+library(textrecipes)
+library(themis)
+
+additional_stop_words <- objects %>%
+  unnest_tokens('word', description) %>% 
+  filter(str_detect(word, "[0-9]")) %>% 
+  pull(word)
+
+model_recipe <- recipe(category ~ description, data = objects_training) %>% 
+  step_downsample(category) %>% 
+  step_tokenize(description) %>% 
+  step_stopwords(description, custom_stopword_source = additional_stop_words) %>% 
+  step_stopwords(description) %>% 
+  step_tokenfilter(description, max_tokens = 500) %>% 
+  step_tfidf(description)
+
+objects_prep <- prep(model_recipe)
+objects_prep
+
+juice(objects_prep)
+
+```
+
+```{r}
+object_workflow <- workflow() %>% 
+  add_recipe(model_recipe)
+```
+
+```{r}
+null_classification <- null_model() %>%
+  set_engine("parsnip") %>%
+  set_mode("classification")
+
+null_rs <- workflow() %>%
+  add_recipe(model_recipe) %>%
+  add_model(null_classification) %>%
+  fit_resamples(
+    objects_folds
+  )
+
+null_rs %>% 
+  collect_metrics()
+```
+
+```{r}
+svm_spec <- svm_rbf() %>%
+  set_mode("classification") %>%
+  set_engine("liquidSVM")
+
+svm_spec
+
+```
+
+```{r}
+svm_wf <- workflow() %>%
+  add_recipe(model_recipe) %>%
+  add_model(svm_spec)
+
+svm_wf
+
+```
+
+```{r}
+set.seed(2021)
+
+svm_rs <- fit_resamples(
+  svm_wf,
+  objects_folds,
+  metrics = metric_set(accuracy, sensitivity, specificity),
+  control = control_resamples(save_pred = TRUE)
+)
+
+```
+
+```{r}
+svm_rs_metrics <- collect_metrics(svm_rs)
+svm_rs_predictions <- collect_predictions(svm_rs)
+```
+
+```{r}
+svm_rs_metrics
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

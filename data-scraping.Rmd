@@ -1,0 +1,213 @@
+
+```{r}
+library(tidyverse)
+library(httr)
+```
+
+```{r}
+resp <- GET(
+  "https://collection.sciencemuseumgroup.org.uk/search/objects/categories/space-technology?&page[number]=1&page[size]=100",
+  add_headers(Accept = 'application/json'))
+
+resp_content <- content(resp, 'text')
+```
+```{r}
+library(jsonlite)
+
+json_to_list <- fromJSON(resp_content)
+
+last_page <- json_to_list$links$last
+last_page_number <- str_extract(last_page, '=[0-9]*') %>% str_remove('=')
+
+pages <- seq(1, last_page_number)
+```
+
+```{r}
+item_urls <- tibble (
+  url = map(pages, ~ str_interp("https://collection.sciencemuseumgroup.org.uk/search/objects/categories/space-technology?&page[number]=${.x}&page[size]=100"))
+) %>% 
+  unnest(url)
+
+item_urls
+```
+
+```{r}
+get_link <- function(.url) {
+  
+  resp <- GET(.url, add_headers(Accept = 'application/json'))
+  resp_content <- content(resp, 'text')
+  
+  json_to_list <- fromJSON(resp_content)
+  json_to_list[[1]]$links 
+  
+}
+```
+
+```{r}
+
+item_urls <- item_urls %>% 
+  mutate(items = map(url, get_link))
+
+item_urls <- item_urls %>% 
+  unnest(items)
+
+```
+
+```{r}
+
+get_data <- function(.url) {
+  resp <- GET(.url, add_headers(Accept = 'application/json'))
+  resp_content <- content(resp, 'text')
+  fromJSON(resp_content)
+}
+
+```
+
+```{r}
+api_returned <- item_urls %>% 
+  mutate(
+    json = map(self, get_data)
+  )
+
+```
+
+```{r}
+
+get_terms <- function(.json) {
+  return (
+    .json$included %>% 
+      filter(type == 'term') %>% 
+      .$attributes %>% 
+      .$hierarchy %>% 
+      .[[1]] %>% 
+      .$name %>% 
+      bind_rows()
+  )
+}
+
+get_people <- function(.json) {
+  return (
+    .json$included %>% 
+      filter(type == 'people') %>% 
+      .$attributes %>% 
+      .$summary_title
+  )
+}
+
+get_title <- function(.json) {
+  return(.json$data[['attributes']][['summary_title']])
+}
+
+get_description <- function(.json) {
+  return(.json$data[['attributes']][['description']]$value)
+}
+
+get_date <- function(.json) {
+  return(.json$data[['attributes']][['lifecycle']][[1]][["date"]][[1]]$value)
+}
+
+get_maker <- function(.json) {
+  return(.json$data[['attributes']][['lifecycle']][[1]][["maker"]][[1]]$summary_title)
+}
+
+get_places <- function(.json) {
+  return(.json$data[['attributes']][['lifecycle']][[1]][["places"]][[1]]$summary_title)
+}
+
+get_materials <- function(.json) {
+  return(.json$data[['attributes']][["materials"]])
+}
+
+get_category <- function(.json) {
+  return(.json$data$attributes$name$value)
+}
+
+```
+
+```{r}
+api_returned_extract <- api_returned %>% 
+  mutate(title = map(json, get_title), 
+         description = map(json, get_description), 
+         terms = map(json, get_terms),
+         people = map(json, get_people),
+         date = map(json, get_date), 
+         maker = map(json, get_maker), 
+         places = map(json, get_places),
+         materials = map(json, get_materials),
+         category = map(json, get_category)) 
+
+```
+
+```{r}
+
+api_returned_extract <- api_returned_extract %>% 
+  select(-json) %>% 
+  mutate(id = str_extract(self, "co[0-9].*/") %>% str_remove('/'))
+
+```
+
+```{r}
+
+titles_descriptions <- api_returned_extract %>% 
+  unnest(description) %>% 
+  group_by(id) %>% 
+  filter(str_length(description) == max(str_length(description))) %>% 
+  slice(1) %>% 
+  ungroup() %>% 
+  unnest(title) %>% 
+  select(id, title, description, "url" = self)
+
+terms <- api_returned_extract %>% 
+  select(id, terms) %>% 
+  unnest(terms) %>% 
+  select(id, value)
+
+people <- api_returned_extract %>% 
+  select(id, people) %>% 
+  unnest(people) 
+
+makers <- api_returned_extract %>% 
+  select(id, maker) %>% 
+  unnest(maker) 
+
+places <- api_returned_extract %>% 
+  select(id, places) %>% 
+  unnest(places)
+
+categories <- api_returned_extract %>% 
+  select(id, category) %>% 
+  unnest(category) 
+
+materials <- api_returned_extract %>% 
+  select(id, materials) %>% 
+  unnest(materials)
+
+```
+
+Output the data
+
+```{r}
+titles_descriptions %>% write_csv("data/objects.csv")
+
+terms %>% write_csv("data/terms.csv")
+
+people %>% write_csv("data/people.csv")
+
+makers %>% write_csv("data/makers.csv")
+
+places %>% write_csv("data/places.csv")
+
+materials %>% write_csv("data/materials.csv")
+
+categories %>% write_csv("data/categories.csv")
+```
+
+Save the data so we don't need to scrape again
+
+```{r}
+saveRDS(api_returned, "api_returned.rds")
+
+```
+
+
+
