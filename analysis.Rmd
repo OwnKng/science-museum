@@ -139,18 +139,16 @@ objects_log_odds %>%
 
 ```
 
-```{r}
-
-```
-
 
 ```{r}
 library(tidymodels)
+
 set.seed(42)
 
 objects_split <- initial_split(objects, strata = category)
 objects_training <- training(objects_split)
 objects_testing <- testing(objects_split)
+
 ```
 
 ```{r}
@@ -177,11 +175,6 @@ model_recipe <- recipe(category ~ description, data = objects_training) %>%
   step_tokenfilter(description, max_tokens = 500) %>% 
   step_tfidf(description)
 
-objects_prep <- prep(model_recipe)
-objects_prep
-
-juice(objects_prep)
-
 ```
 
 ```{r}
@@ -197,9 +190,7 @@ null_classification <- null_model() %>%
 null_rs <- workflow() %>%
   add_recipe(model_recipe) %>%
   add_model(null_classification) %>%
-  fit_resamples(
-    objects_folds
-  )
+  fit_resamples(objects_folds)
 
 null_rs %>% 
   collect_metrics()
@@ -211,7 +202,6 @@ svm_spec <- svm_rbf() %>%
   set_engine("liquidSVM")
 
 svm_spec
-
 ```
 
 ```{r}
@@ -220,7 +210,6 @@ svm_wf <- workflow() %>%
   add_model(svm_spec)
 
 svm_wf
-
 ```
 
 ```{r}
@@ -243,8 +232,6 @@ svm_rs_predictions <- collect_predictions(svm_rs)
 ```{r}
 svm_rs_metrics
 ```
-
-
 
 
 
