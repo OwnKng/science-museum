@@ -139,7 +139,7 @@ objects_log_odds %>%
 
 ```
 
-
+Separate our data into testing and training data.  
 ```{r}
 library(tidymodels)
 
@@ -151,13 +151,15 @@ objects_testing <- testing(objects_split)
 
 ```
 
+Create a set of cross-validation folds, which will divide our training data into 10 datasets, each containing an analysis and assessment set.  
+
 ```{r}
 set.seed(42)
 objects_folds <- vfold_cv(objects_training, strata = category)
 objects_folds
 
 ```
-
+Create our model recipe
 ```{r}
 library(textrecipes)
 library(themis)
@@ -177,10 +179,13 @@ model_recipe <- recipe(category ~ description, data = objects_training) %>%
 
 ```
 
+Create a workflow - workflows allow us to construct a model from the recipe and the model spec. 
 ```{r}
 object_workflow <- workflow() %>% 
   add_recipe(model_recipe)
 ```
+
+collect_metrics() returns the summarised metrics from our folds - in our case the mean. 
 
 ```{r}
 null_classification <- null_model() %>%
@@ -205,19 +210,57 @@ svm_spec
 ```
 
 ```{r}
-svm_wf <- workflow() %>%
-  add_recipe(model_recipe) %>%
+object_workflow <- object_workflow %>%
   add_model(svm_spec)
 
-svm_wf
+object_workflow
 ```
 
 ```{r}
 set.seed(2021)
 
 svm_rs <- fit_resamples(
-  svm_wf,
+  object_workflow,
   objects_folds,
+  metrics = metric_set(accuracy, sensitivity, specificity),
+)
+
+```
+
+```{r}
+svm_rs_metrics <- collect_metrics(svm_rs)
+```
+
+```{r}
+svm_rs_metrics
+```
+
+```{r}
+svm_spec_tuned <- svm_rbf(cost = tune(), rbf_sigma = tune()) %>% 
+  set_mode('classification') %>% 
+  set_engine('liquidSVM')
+
+```
+
+```{r}
+param_grid <- grid_regular(cost(), rbf_sigma(), levels = 5)
+
+```
+
+```{r}
+object_workflow <- object_workflow %>% 
+  update_model(svm_spec_tuned)
+
+```
+
+
+```{r}
+set.seed(2021)
+
+tune_rs <- tune_grid(
+  object_workflow,
+  objects_folds,
+  grid = param_grid,
   metrics = metric_set(accuracy, sensitivity, specificity),
   control = control_resamples(save_pred = TRUE)
 )
@@ -225,13 +268,90 @@ svm_rs <- fit_resamples(
 ```
 
 ```{r}
-svm_rs_metrics <- collect_metrics(svm_rs)
-svm_rs_predictions <- collect_predictions(svm_rs)
+collect_metrics(tune_rs) %>% 
+  filter(.metric == 'accuracy') %>% 
+  arrange(desc(.metric))
+
+show_best(tune_rs, metric = "accuracy")
+```
+
+Lasso Regression 
+
+```{r}
+objects_sparse <- object_descriptions %>% 
+  add_count(word) %>% 
+  filter(n > 10) %>% 
+  add_count(id, word) %>% 
+  distinct(id, category, word, nn) %>% 
+  pivot_wider(names_from = word, values_from = nn, values_fill = list(nn = 0))
+  
 ```
 
 ```{r}
-svm_rs_metrics
+set.seed(42)
+
+objects_split <- initial_split(objects_sparse, strata = category)
+objects_training <- training(objects_split)
+objects_testing <- testing(objects_split)
+
 ```
+
+```{r}
+set.seed(42)
+object_folds <- vfold_cv(objects_training, strata = category)
+
+```
+
+```{r}
+sparse_recipe <- recipe(category~ ., data = objects_training) %>% 
+  update_role(id, new_role = 'id') %>% 
+  step_downsample(category) %>% 
+  step_zv(all_numeric(), -all_outcomes()) %>% 
+  step_normalize(all_numeric(), -all_outcomes())
+
+```
+
+```{r}
+lasso_spec <- logistic_reg(penalty = 0.1, mixture = 1) %>% 
+  set_engine('glmnet')
+
+lasso_spec
+```
+
+```{r}
+object_workflow <- workflow() %>% 
+  add_recipe(sparse_recipe) %>% 
+  add_model(lasso_spec)
+```
+
+```{r}
+lasso_rs <- object_workflow %>% 
+  fit_resamples(
+    object_folds,
+    metrics = metric_set(accuracy, specificity, sensitivity, roc_auc)
+  )
+```
+
+```{r}
+collect_metrics(lasso_rs)
+```
+
+
+```{r}
+lasso_fit <- object_workflow %>% 
+  fit(objects_training)
+```
+
+```{r}
+
+lasso_fit %>%
+  pull_workflow_fit() %>% 
+  tidy() %>% 
+  arrange(desc(estimate))
+
+```
+
+
 
 
 
