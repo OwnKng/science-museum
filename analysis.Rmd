@@ -1,13 +1,18 @@
+# Using Text Analysis to Classify Exhibits in the Science Museum 
 
+The Science Museum holds more than 325,000 objects in its exhibition halls and archives, including the world's oldest surviving locomotive, the first jet engine and the Apollo 10 command module. The Science Museum have made available information about each object in their collection via an [api](https://www.sciencemuseumgroup.org.uk/about-us/collection/using-our-collection-api/), which provides details of the object's age, country of origin, materials and a text description. 
 
-```{r}
-library(tidyverse)
-library(tidytext)
+In this article, we're going to explore these text descriptions using the `tidytext()` package, and then build a machine learning model using using the `tidymodels()`. This machine learning model will predict use the description of the object to identify whether it is an item from the the computing and data collection, or the space collection.     
 
+We'll start by loading the `tidyverse()` packages, which we'll be using throughout our analysis, and reading in the data. I've written a separate script to query the api and export the descriptions as a csv, which is available on my github. 
+
+```{r, include=FALSE}
 options(scipen = 9999)
 ```
 
 ```{r}
+library(tidyverse)
+
 computing <- read_csv("data/computing-data-processing/objects.csv") 
 space <- read_csv("data/space/objects.csv")
 
@@ -16,8 +21,9 @@ objects <- bind_rows(list('computing' = computing, 'space' = space), .id = 'cate
 objects
 
 ```
-
 ```{r}
+library(tidytext)
+
 object_descriptions <- objects %>% 
   unnest_tokens('word', description) %>% 
   anti_join(stop_words, by = 'word') %>% 
@@ -29,19 +35,46 @@ object_descriptions
 ```{r}
 object_descriptions %>% 
   add_count(id) %>% 
-  ggplot() +
-  geom_density(aes(n))
+  distinct(id, n) %>% 
+  ggplot(aes(n)) +
+  geom_histogram(binwidth = 5, boundary = 0, color = 'white') + 
+  geom_rug()
+
+```
+
+Which words are most common? 
+```{r}
+object_descriptions %>% 
+  count(category, word) %>% 
+  group_by(category) %>% 
+  slice_max(n = 20, order_by = n) %>% 
+  mutate(word = reorder_within(word, n, category)) %>% 
+  ggplot(aes(n, word)) + 
+  geom_col() + 
+  facet_wrap(~category, scales = 'free') + 
+  scale_y_reordered()
 
 ```
 
 ```{r}
-object_descriptions <- object_descriptions %>% 
-  add_count(id) %>% 
-  filter(n >= 5) %>% 
-  select(-n)
+library(tidylo)
 
-object_descriptions %>% distinct(id, category) %>% count(category)
+objects_log_odds <- object_descriptions %>% 
+  count(category, word) %>% 
+  bind_log_odds(category, word, n) %>% 
+  arrange(desc(log_odds_weighted)) 
+
+objects_log_odds %>% 
+  group_by(category) %>% 
+  slice_max(log_odds_weighted, n = 20)  %>% 
+  mutate(word = fct_reorder(word, log_odds_weighted)) %>% 
+  ggplot(aes(log_odds_weighted, word, fill = category)) + 
+  geom_col() + 
+  facet_wrap(~category, scales = "free")
+
 ```
+
+How are the words connected? 
 
 ```{r}
 library(widyr)
@@ -73,7 +106,7 @@ word_pairs %>%
   theme_void()
 
 word_pairs %>% 
-  filter(category == 'space', n > 20) %>%
+  filter(category == 'space', n > 10) %>%
   select(-category) %>% 
   graph_from_data_frame() %>% 
   ggraph(layout = 'fr') +
@@ -88,8 +121,8 @@ word_pairs %>%
 keywords <- object_descriptions %>% 
   group_by(category) %>% 
   add_count(word) %>% 
-  filter(n > 20) %>% 
-  ungroup()
+  ungroup() %>% 
+  filter(category == 'computing' & n > 20 | category == 'space' & n > 10) 
 
 word_cors <- keywords %>% 
   group_by(category) %>% 
@@ -110,7 +143,7 @@ word_cors %>%
   theme_void()
 
 word_cors %>% 
-  filter(category == 'space', correlation > 0.2) %>%
+  filter(category == 'space', correlation > 0.3) %>%
   select(-category) %>% 
   graph_from_data_frame()  %>% 
   ggraph(layout = 'fr') +
@@ -121,23 +154,7 @@ word_cors %>%
 
 ```
 
-```{r}
-library(tidylo)
-
-objects_log_odds <- object_descriptions %>% 
-  count(category, word) %>% 
-  bind_log_odds(category, word, n) %>% 
-  arrange(desc(log_odds_weighted)) 
-
-objects_log_odds %>% 
-  group_by(category) %>% 
-  slice_max(log_odds_weighted, n = 20)  %>% 
-  mutate(word = fct_reorder(word, log_odds_weighted)) %>% 
-  ggplot(aes(log_odds_weighted, word, fill = category)) + 
-  geom_col() + 
-  facet_wrap(~category, scales = "free")
-
-```
+Building a model
 
 Separate our data into testing and training data.  
 ```{r}
@@ -159,6 +176,7 @@ objects_folds <- vfold_cv(objects_training, strata = category)
 objects_folds
 
 ```
+
 Create our model recipe
 ```{r}
 library(textrecipes)
@@ -170,19 +188,28 @@ additional_stop_words <- objects %>%
   pull(word)
 
 model_recipe <- recipe(category ~ description, data = objects_training) %>% 
-  step_downsample(category) %>% 
   step_tokenize(description) %>% 
   step_stopwords(description, custom_stopword_source = additional_stop_words) %>% 
   step_stopwords(description) %>% 
+  step_stem(description) %>% 
   step_tokenfilter(description, max_tokens = 500) %>% 
-  step_tfidf(description)
+  step_tfidf(description) %>% 
+  step_downsample(category) 
 
 ```
+
+```{r}
+prep(model_recipe) %>% 
+  bake(new_data = NULL) 
+
+```
+
 
 Create a workflow - workflows allow us to construct a model from the recipe and the model spec. 
 ```{r}
 object_workflow <- workflow() %>% 
   add_recipe(model_recipe)
+
 ```
 
 collect_metrics() returns the summarised metrics from our folds - in our case the mean. 
@@ -201,6 +228,59 @@ null_rs %>%
   collect_metrics()
 ```
 
+
+```{r}
+library(discrim)
+
+nb_spec <- naive_Bayes() %>% 
+  set_mode('classification') %>% 
+  set_engine('naivebayes')
+
+object_workflow <- object_workflow %>% 
+  add_model(nb_spec)
+
+```
+
+```{r}
+
+nb_model <- fit_resamples(
+  object_workflow,
+  objects_folds,
+  metrics = metric_set(accuracy, sensitivity, specificity)
+)
+
+collect_metrics(nb_model)
+
+```
+
+Random Forest Model
+
+```{r}
+rf_spec <- rand_forest(trees = 1000) %>%
+  set_engine("randomForest") %>%
+  set_mode("classification")
+
+object_workflow <- object_workflow %>% 
+  update_recipe(model_recipe) %>% 
+  update_model(rf_spec) 
+
+```
+
+```{r}
+set.seed(2021)
+
+rf_model <- fit_resamples(
+  object_workflow,
+  objects_folds,
+  metrics = metric_set(accuracy, sensitivity, specificity)
+)
+
+rf_model %>% 
+  collect_metrics()
+
+```
+
+Creating a support-vector machine model 
 ```{r}
 svm_spec <- svm_rbf() %>%
   set_mode("classification") %>%
@@ -211,7 +291,7 @@ svm_spec
 
 ```{r}
 object_workflow <- object_workflow %>%
-  add_model(svm_spec)
+  update_model(svm_spec)
 
 object_workflow
 ```
@@ -234,6 +314,8 @@ svm_rs_metrics <- collect_metrics(svm_rs)
 ```{r}
 svm_rs_metrics
 ```
+
+Tuning our SVM model. 
 
 ```{r}
 svm_spec_tuned <- svm_rbf(cost = tune(), rbf_sigma = tune()) %>% 
@@ -273,83 +355,35 @@ collect_metrics(tune_rs) %>%
   arrange(desc(.metric))
 
 show_best(tune_rs, metric = "accuracy")
-```
-
-Lasso Regression 
-
-```{r}
-objects_sparse <- object_descriptions %>% 
-  add_count(word) %>% 
-  filter(n > 10) %>% 
-  add_count(id, word) %>% 
-  distinct(id, category, word, nn) %>% 
-  pivot_wider(names_from = word, values_from = nn, values_fill = list(nn = 0))
-  
-```
-
-```{r}
-set.seed(42)
-
-objects_split <- initial_split(objects_sparse, strata = category)
-objects_training <- training(objects_split)
-objects_testing <- testing(objects_split)
 
 ```
 
 ```{r}
-set.seed(42)
-object_folds <- vfold_cv(objects_training, strata = category)
+best_accuracy <- select_best(tune_rs, 'accuracy')
+
+object_workflow_final <- finalize_workflow(object_workflow, best_accuracy)
+
+object_workflow_final
 
 ```
 
 ```{r}
-sparse_recipe <- recipe(category~ ., data = objects_training) %>% 
-  update_role(id, new_role = 'id') %>% 
-  step_downsample(category) %>% 
-  step_zv(all_numeric(), -all_outcomes()) %>% 
-  step_normalize(all_numeric(), -all_outcomes())
-
+final_res <- object_workflow_final %>% 
+  last_fit(objects_split, metrics = metric_set(accuracy, sensitivity, specificity))
 ```
 
 ```{r}
-lasso_spec <- logistic_reg(penalty = 0.1, mixture = 1) %>% 
-  set_engine('glmnet')
-
-lasso_spec
+final_res_metrics <- collect_metrics(final_res)
+final_res_predictions <- collect_predictions(final_res)
 ```
 
 ```{r}
-object_workflow <- workflow() %>% 
-  add_recipe(sparse_recipe) %>% 
-  add_model(lasso_spec)
-```
-
-```{r}
-lasso_rs <- object_workflow %>% 
-  fit_resamples(
-    object_folds,
-    metrics = metric_set(accuracy, specificity, sensitivity, roc_auc)
-  )
-```
-
-```{r}
-collect_metrics(lasso_rs)
+final_res_metrics
 ```
 
 
-```{r}
-lasso_fit <- object_workflow %>% 
-  fit(objects_training)
-```
 
-```{r}
 
-lasso_fit %>%
-  pull_workflow_fit() %>% 
-  tidy() %>% 
-  arrange(desc(estimate))
-
-```
 
 
 
