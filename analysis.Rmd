@@ -2,47 +2,84 @@
 
 The Science Museum holds more than 325,000 objects in its exhibition halls and archives, including the world's oldest surviving locomotive, the first jet engine and the Apollo 10 command module. The Science Museum have made available information about each object in their collection via an [api](https://www.sciencemuseumgroup.org.uk/about-us/collection/using-our-collection-api/), which provides details of the object's age, country of origin, materials and a text description. 
 
-In this article, we're going to explore these text descriptions using the `tidytext()` package, and then build a machine learning model using using the `tidymodels()`. This machine learning model will predict use the description of the object to identify whether it is an item from the the computing and data collection, or the space collection.     
+In this article, we're going to explore these text descriptions using the `tidytext` package, and then build several machine learning models using using the `tidymodels` package. These supervised learning models will use the description of the object to identify whether it is an item from the the computing and data collection, or the space collection.     
 
-We'll start by loading the `tidyverse()` packages, which we'll be using throughout our analysis, and reading in the data. I've written a separate script to query the api and export the descriptions as a csv, which is available on my github. 
+We'll start by loading the `tidyverse` packages, which we'll be using throughout our analysis, and reading in the data. I've written a separate script to query the api and export the descriptions as a csv, which is [available on my github](https://github.com/OwnKng/science-museum/blob/main/data-scraping.Rmd). The computing and space objects are in two separate csv files, so we'll read them in and then use `bind_rows()` to merge them.  
 
 ```{r, include=FALSE}
 options(scipen = 9999)
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+
+
 ```
 
-```{r}
+```{r, warning=FALSE, message=FALSE}
 library(tidyverse)
 
 computing <- read_csv("data/computing-data-processing/objects.csv") 
 space <- read_csv("data/space/objects.csv")
 
-objects <- bind_rows(list('computing' = computing, 'space' = space), .id = 'category')
+objects <- bind_rows(list('computing' = computing, 'space' = space), .id = 'category') %>% 
+  distinct(description, .keep_all = TRUE)
 
-objects
+objects %>% glimpse()
 
 ```
+
+The description column in our data contains a text description of the item, these vary in length and format. Two somewhat typical examples are below. We'll analysing these descriptions using the `tidytext` package.  
+
+```{r}
+objects %>% 
+  filter(id == 'co408737') %>% 
+  pull(description)
+
+objects %>% 
+  filter(id == 'co433631') %>% 
+  pull(description)
+```
+
+# Text Mining with TidyText
+
+[`tidytext`](https://cran.r-project.org/web/packages/tidytext/readme/README.html) is a superb package for manipulating and analysing text data in R, originally developed by Julia Silge and David Robinson. The first thing we'll do using `tidytext` is tokenise our descriptions - breaking each description down into individual words. We'll then remove from these words any stop words - extremely common words that don't add much to an analysis. 
+
+In our descriptions, there are also a lot of numbers. Sometimes these numbers have a particular significance - such as the year the object was produced - but often they're an obscure product serial number. For our analysis, we'll remove any numbers from our words.       
 ```{r}
 library(tidytext)
 
 object_descriptions <- objects %>% 
-  unnest_tokens('word', description) %>% 
+  unnest_tokens('word', description, drop = FALSE) %>% 
   anti_join(stop_words, by = 'word') %>% 
   filter(!str_detect(word, "[0-9]"))
 
 object_descriptions
+
 ```
+
+Once we've done this we can explore the number of non-common words in our descriptions for each item. There are around 2,750 objects in our dataset, and approximately 1,000 of them have between 5 and 10 non-common words. A large number, around 850, have fewer than five non-common words.   
 
 ```{r}
 object_descriptions %>% 
   add_count(id) %>% 
-  distinct(id, n) %>% 
+  distinct(category, id, n) %>% 
   ggplot(aes(n)) +
   geom_histogram(binwidth = 5, boundary = 0, color = 'white') + 
-  geom_rug()
+  geom_rug() 
 
 ```
 
-Which words are most common? 
+There are some items with long descriptions. We might expect these items to be those of great historical significance, but this doesn't really seem to be the case. While the Apollo 10 command module is among the longest descriptions, our longest descriptions are for two different versions of the same games console - the C64 and the C64 mini. Many of the other long descriptions are descriptions of space meals for astronaut Tim Peak.           
+
+```{r}
+object_descriptions %>% 
+  count(title, description) %>% 
+  slice_max(n = 10, order_by = n)
+
+```
+
+# What are the most common words in the descriptions? 
+
+One basic question we can ask of the data is what are the most common words in the computing and space collections. Looking at the visualisation below, we can see that within computing, 'computer', 'game' and 'model' are the most frequently used words. 'Model' is also a frequently used word in the space descriptions, though likely in a different context (e.g. a scale model of a rocket, etc), along with 'rocket', 'scale', 'satellite' and 'space.'    
+
 ```{r}
 object_descriptions %>% 
   count(category, word) %>% 
@@ -55,8 +92,9 @@ object_descriptions %>%
   scale_y_reordered()
 
 ```
-
-```{r}
+One limitation of merely counting words is that there are some terms which are likely to be common in each category, such as model. So rather than merely counting words, we can also estimate the how likely different words is to be found in each category using log odds. We can calculate log odds using the `bind_log_odds()` function from the `tidylo` package[^1]. Looking at the graph below, we can see that words such as 'calculator', 'video', 'cassette' are much more likely to be found in the computing descriptions. We can also see the presence of a number of brand names that appear in the computing descriptions - 'Apple', 'Nintendo', 'Commodore'.    
+ 
+```{r, message=FALSE, warning=FALSE}
 library(tidylo)
 
 objects_log_odds <- object_descriptions %>% 
@@ -68,15 +106,17 @@ objects_log_odds %>%
   group_by(category) %>% 
   slice_max(log_odds_weighted, n = 20)  %>% 
   mutate(word = fct_reorder(word, log_odds_weighted)) %>% 
-  ggplot(aes(log_odds_weighted, word, fill = category)) + 
-  geom_col() + 
+  ggplot() + 
+  geom_col(aes(log_odds_weighted, word, fill = category), show.legend = FALSE) + 
   facet_wrap(~category, scales = "free")
 
 ```
 
-How are the words connected? 
 
-```{r}
+# How are the words connected? 
+We may also be interested in which words appear together within an object's description. We can estimate this for each group with the `pairwise_count()` function from the `widyr` package. This code will return to use a dataset of the number of times every word in our data appears with every other word, calculated separately within each category.   
+
+```{r, message=FALSE}
 library(widyr)
 
 word_pairs <- object_descriptions %>% 
@@ -87,9 +127,12 @@ word_pairs <- object_descriptions %>%
   unnest(pairs) %>% 
   ungroup()
 
-```
+word_pairs
 
-```{r}
+```
+We can then visualise the connections between these words as network graphs, using the `ggraph` package. Looking at the network graphs, we can see 'computer' connects many words within the computing objects, but that there are also strong links between terms like 'game', 'video' and 'cassette'. 
+
+```{r, message=FALSE}
 library(ggraph)
 library(igraph)
 
@@ -105,8 +148,15 @@ word_pairs %>%
   geom_node_text(aes(label = name), vjust = 1, hjust = 1) + 
   theme_void()
 
+```
+
+Our space network is somewhat sparser, but we can see that the strongest link is between 'scale' and 'model'. We can also see links between 'rocket' and 'engine', 'motor' and 'chamber'.   
+
+```{r}
+set.seed(42)
+
 word_pairs %>% 
-  filter(category == 'space', n > 10) %>%
+  filter(category == 'space', n > 15) %>%
   select(-category) %>% 
   graph_from_data_frame() %>% 
   ggraph(layout = 'fr') +
@@ -117,12 +167,16 @@ word_pairs %>%
 
 ```
 
+As with our earlier discussion of word counts, there are limits to what we can infer by looking at pairwise counts. 'Scale' and 'model' are common words in our space object descriptions, so it's not surprising they're frequently seen with each other and other words. 
+
+We might instead be interested in the correlation between words, which indicates how often these words appear together relative to how often they appear separately. The `widr` package also provides a function for this, `pairwise_cor()`, which uses the [phi coefficient](https://en.wikipedia.org/wiki/Phi_coefficient).   
+
 ```{r}
 keywords <- object_descriptions %>% 
   group_by(category) %>% 
   add_count(word) %>% 
   ungroup() %>% 
-  filter(category == 'computing' & n > 20 | category == 'space' & n > 10) 
+  filter(category == 'computing' & n > 20 | category == 'space' & n > 15) 
 
 word_cors <- keywords %>% 
   group_by(category) %>% 
@@ -131,6 +185,15 @@ word_cors <- keywords %>%
   select(-data) %>% 
   unnest(cor) %>% 
   ungroup()
+
+```
+
+We can then visualise these connections using the `ggraph` package, as we did before. 
+
+Here, we can see in the computing category that the strongest correlations often relate to particular types of technology ('circuit' and 'board', 'punched' and 'cards', 'word' and 'processing') or brand ('sony' and 'playstation', 'hewlett' and 'packard', 'intel' and 'microprocessor'). 
+
+```{r}
+set.seed(2021)
 
 word_cors %>% 
   filter(category == 'computing', correlation > 0.5) %>%
@@ -141,6 +204,13 @@ word_cors %>%
   geom_node_point() +
   geom_node_text(aes(label = name), vjust = 1, hjust = 1) + 
   theme_void()
+
+```
+
+In the space correlations, we can see a strong correlation between several items related to space food. This is likely because, as we saw earlier, there were several objects related to this topic that reused a lot of the same copy. We can also see particular missions or programmes - e.g. 'black' and 'knight', related to the UK's [Black Knight missile research](https://en.wikipedia.org/wiki/Black_Knight_(rocket)) - or the popular culture space items, evidenced by the correlation between 'star' and 'trek'.      
+
+```{r}
+set.seed(2021)
 
 word_cors %>% 
   filter(category == 'space', correlation > 0.3) %>%
@@ -154,10 +224,14 @@ word_cors %>%
 
 ```
 
-Building a model
+# Machine Learning with TidyModels
+So far we've explored the descriptions of the computing and space objects, getting a feel for the terms they use and the substance of the descriptions. One thing we could do to extend this analysis is develop a statistical model that could predict from looking at the object descriptions whether it belonged in the computing or space collection. We'll try and fit a few different models using the `tidymodels` package. 
 
-Separate our data into testing and training data.  
-```{r}
+`Tidymodels` is a collection of modelling packages that provides a unified interface to many different statistical modelling packages. In practise, this means we don't need to remember the idiosyncrasies of a particular model implementation, but simply follow some consistent steps using `tidymodels`.     
+
+The first step in creating our model is to divide the data into separate datasets for training and testing. 
+
+```{r, message=FALSE}
 library(tidymodels)
 
 set.seed(42)
@@ -168,7 +242,9 @@ objects_testing <- testing(objects_split)
 
 ```
 
-Create a set of cross-validation folds, which will divide our training data into 10 datasets, each containing an analysis and assessment set.  
+We want our training process to be as robust as possible, so we'll also divide the c. 2000 training data objects further into separate cross-validation 'folds'. This process breaks our training data into ten roughly equally sized pieces, each known as a fold. The first fold will function like a test set in that we'll use it to assess the performance of our model. The rest of the data will be used to train our model. We'll repeat this dividing process ten times (creating ten slightly different models), and then average the performance across all the folds. 
+
+This gives us a good feel for whether our modelling approach is a good one before we touch the testing data. One important limitation with machine learning is that our training set is not a good arbiter of performance - a model built on the training data might overfit the data, producing impressive results which are not replicable when we apply the model to the testing data. If we use cross-validation, this is less likely to occur because we're creating ten different datasets to train and measure the model.   
 
 ```{r}
 set.seed(42)
@@ -177,7 +253,16 @@ objects_folds
 
 ```
 
-Create our model recipe
+## Writing a model recipe
+
+Now that we've separated our data, let's think about the steps we need to take before we fit our model. As we're interested in using the raw text descriptions to predict an object's category, there are a number of processing steps we need to undertake. In `tidymodels`, these processing steps are part of a recipe, which specifies our model formula and all the transformations we want to apply to our data before we fit the model. `tidymodels` comes with an extensive number of functions for processing text data. 
+
+Our recipe involves first tokenizing the data and removing any stop words. We also stem the words, which reduces the word to its base or root form, using `step_stem`. This means words like 'astronauts' will be reduced to 'astronaut', or 'computation' to 'compute'. This isn't always necessary, but given that many of our works are plurals or other variations on more common words, it may help the model identify the roots within each category. We'll also use only the most common 500 words in our descriptions by specifying 500 to our `step_tokenfilder`.
+
+We don't use the words in our model. Instead, we take their *term frequency inverse document frequency (tf-idf)*. The idea of the tf-idf is that it provides a numeric estimate of how important a word is in a collection of documents. A word that appears in every document, for instance, will have a tf-idf score of zero, and so is deemed unlikely to convey anything of particular significance in any one of the documents. We saw earlier that 'model' is a relatively common word across all of our object descriptions, it will be assigned a lower tf-idf as it's less likely to tell us much about whether the object is a space or computing object, compared with terms like computer or rocket.    
+
+Finally, we down-sample the category column so that we have a more equal proportion of space and computing objects in our data. This will help guard against the model simply learning to select the more prominent category every time.  
+
 ```{r}
 library(textrecipes)
 library(themis)
@@ -198,21 +283,15 @@ model_recipe <- recipe(category ~ description, data = objects_training) %>%
 
 ```
 
+We can now attach our model to a `workflow`. A `workflow` in `tidymodels` bundles together our recipe and the model we're going to create. The advantage of this is that we can then swap one model for another one, while keeping the recipe the same.    
+
 ```{r}
-prep(model_recipe) %>% 
-  bake(new_data = NULL) 
-
-```
-
-
-Create a workflow - workflows allow us to construct a model from the recipe and the model spec. 
-```{r}
-object_workflow <- workflow() %>% 
+objects_workflow <- workflow() %>% 
   add_recipe(model_recipe)
 
 ```
 
-collect_metrics() returns the summarised metrics from our folds - in our case the mean. 
+We'll also want to create a null model, which we'll compare to each of our statistical models. The null model will simply guess the modal class in our data on every prediction. In our case it will guess that each object is a computing object, and as around three-quarters of our objects are computing objects, it will be right around three-quarters of the time. This is the threshold we'll aim to beat with our models.   
 
 ```{r}
 null_classification <- null_model() %>%
@@ -222,12 +301,16 @@ null_classification <- null_model() %>%
 null_rs <- workflow() %>%
   add_recipe(model_recipe) %>%
   add_model(null_classification) %>%
-  fit_resamples(objects_folds)
+  fit_resamples(objects_folds, metrics = metric_set(accuracy, sensitivity, specificity))
 
 null_rs %>% 
   collect_metrics()
 ```
 
+## A Naive Bayes Model
+Let's start with a naive Bayes model, which are often good at making predictions from text data due to their ability to accommodate a large number of features. Naive Bayes models are commonly used to identify spam email, for instance.  
+
+Fitting a naive Bayes model with `tidymodels` is very simple, we simply call the `naive_Bayes()` function and specify our mode (in our case classification). Then we add our model to our model workflow.  
 
 ```{r}
 library(discrim)
@@ -236,15 +319,21 @@ nb_spec <- naive_Bayes() %>%
   set_mode('classification') %>% 
   set_engine('naivebayes')
 
-object_workflow <- object_workflow %>% 
+objects_workflow <- objects_workflow %>% 
   add_model(nb_spec)
 
+objects_workflow
+
 ```
+
+Now we can fit the model onto our cross-validated folds. We'll use several metrics to evaluate performance - accuracy, which is the percentage of objects we identify correctly; sensitivity, which is the number of correct predictions for 'computing' divided by the number of computing objects; and specificity, which is the number of correct predictions for 'space' objects divided by the actual number of space objects. 
+
+Our naive Bayes model performs just as badly as our null model. Like our null model, it optimises by simply predicting that everything is a computing object. It therefore has a sensitivity of 1, because it correctly identifies all the computing objects, but a specificity of rate of 0, because it never predicts that any object belongs in the space category.   
 
 ```{r}
 
 nb_model <- fit_resamples(
-  object_workflow,
+  objects_workflow,
   objects_folds,
   metrics = metric_set(accuracy, sensitivity, specificity)
 )
@@ -253,24 +342,32 @@ collect_metrics(nb_model)
 
 ```
 
-Random Forest Model
+## A Random Forest Model 
+Let's try a random forest model, which can also accommodate a large number of variables. To do this, we simply create a new model specification and update our workflow.  
 
 ```{r}
+
 rf_spec <- rand_forest(trees = 1000) %>%
   set_engine("randomForest") %>%
   set_mode("classification")
 
-object_workflow <- object_workflow %>% 
+objects_workflow <- objects_workflow %>% 
   update_recipe(model_recipe) %>% 
   update_model(rf_spec) 
 
 ```
 
+We can then fit this model to our resamples and evaluate its performance. Note that one of the disadvantages of a random forest model with so many variables fitted over 10 folds is that it's computationally very expensive. For this reason, we use `doParallel::registerDoParallel()` to run the model fitting on several cores at the same time.   
+
+The random forest model performs excellently - correctly identifying 95% of our objects, and achieving a sensitivity and specificity rate of 97% and 90% respectively.  
+
 ```{r}
+doParallel::registerDoParallel()
+
 set.seed(2021)
 
 rf_model <- fit_resamples(
-  object_workflow,
+  objects_workflow,
   objects_folds,
   metrics = metric_set(accuracy, sensitivity, specificity)
 )
@@ -280,67 +377,77 @@ rf_model %>%
 
 ```
 
-Creating a support-vector machine model 
+## A Support-Vector Machine Model
+Although the random forest results were very promising, we might just want to compare them to another model. This time we'll use a Support-Vector Machine model (SVM). SVMs are mathematically very complicated, but can be reasonably well understood with a simple heuristic. An SVM attempts to identify a boundary (known as a hyperplane) which separates data into fairly homogeneous groups. In a two dimensional space, this can be understood as a straight line drawn over a set of x and y coordinates that divides a set of points into two camps, with each camp representing something meaningful in the data. 
+
+In practise, SVMs can partition data over many different dimensions and can also be tweaked to adjust their operations when a clean split between groups in the data isn't possible (something we'll get to later). SVMs work well on classification tasks using text data, and are easy to implement and tune with `tidymodels`.     
+
+We'll first create a spec, and then update our `objects_workflow` with the new model. 
+
 ```{r}
 svm_spec <- svm_rbf() %>%
   set_mode("classification") %>%
   set_engine("liquidSVM")
 
-svm_spec
-```
-
-```{r}
-object_workflow <- object_workflow %>%
+objects_workflow <- objects_workflow %>%
   update_model(svm_spec)
-
-object_workflow
 ```
 
+We can then fit this model to our resamples to evaluate its performance. 
+
 ```{r}
+doParallel::registerDoParallel()
+
 set.seed(2021)
 
 svm_rs <- fit_resamples(
-  object_workflow,
+  objects_workflow,
   objects_folds,
   metrics = metric_set(accuracy, sensitivity, specificity),
 )
-
 ```
+
+Our SVM model performs almost as well as our random forest model in terms of accuracy and sensitivity, and actually performs better at correctly identifying our space objects. 
 
 ```{r}
 svm_rs_metrics <- collect_metrics(svm_rs)
-```
 
-```{r}
 svm_rs_metrics
 ```
 
-Tuning our SVM model. 
+### Tuning our SVM Model
+One way we could try and boost the SVM's performance further is by tuning some of its parameters. In our SVM model, there are two parameters we might want to tune. 
+
+First, the cost parameter. The cost parameter is used to adjust a penalty that's applied to the model when our hyperplane can't neatly separate our data into meaningful camps. The greater the cost parameter, the harder the model will try to achieve total separation. This may sound like a higher cost is always better, but it's important to recognise optimising too much to our training data will possibly result in worse performance on our testing data as our model won't generalise well. 
+
+Second, the sigma (often also referred to as the gamma). The sigma determines the influence that each observation may exert on where the hyperplane is placed. 
+
+We can easily identify the optimal values for these using a tuning grid. First, we'll create a new SVM model spec where we'll state that we want to tune the `cost` and `rbf_sigma` parameters.     
 
 ```{r}
 svm_spec_tuned <- svm_rbf(cost = tune(), rbf_sigma = tune()) %>% 
   set_mode('classification') %>% 
   set_engine('liquidSVM')
 
+objects_workflow <- objects_workflow %>% 
+  update_model(svm_spec_tuned)
 ```
+
+We'll now generate a grid of these parameters. `Tidymodels` actually provides functions to help us select sensible values for each. We'll set levels equal to five, so that we are given five cost values and five sigma values. The grid combine each value, giving us 25 different values pairs of cost and sigma to try.   
 
 ```{r}
 param_grid <- grid_regular(cost(), rbf_sigma(), levels = 5)
-
 ```
 
-```{r}
-object_workflow <- object_workflow %>% 
-  update_model(svm_spec_tuned)
+We'll now 25 different models (each with a different set of parameters) onto ten different training folds - in effect, we're about to fit 250 models. Again, because of the computation involved, we'll set up parallel processing.    
 
-```
+```{r, message=FALSE}
+doParallel::registerDoParallel()
 
-
-```{r}
 set.seed(2021)
 
 tune_rs <- tune_grid(
-  object_workflow,
+  objects_workflow,
   objects_folds,
   grid = param_grid,
   metrics = metric_set(accuracy, sensitivity, specificity),
@@ -349,39 +456,61 @@ tune_rs <- tune_grid(
 
 ```
 
-```{r}
-collect_metrics(tune_rs) %>% 
-  filter(.metric == 'accuracy') %>% 
-  arrange(desc(.metric))
+We can then collect the performance metrics and identify which parameter set produced the best results. Our model with the lowest cost parameter and a sigma of one performed the best. Even this model, however, doesn't quite achieve the performance seen on our earlier random forest model. 
 
+```{r}
 show_best(tune_rs, metric = "accuracy")
+```
+### Finalising our model
+Let's finalise our random forest model and apply it to our testing data. We'll first revert our workflow back to using the random forest specification we defined earlier. 
+
+```{r}
+objects_workflow <- objects_workflow %>% 
+  update_model(rf_spec)
 
 ```
 
-```{r}
-best_accuracy <- select_best(tune_rs, 'accuracy')
-
-object_workflow_final <- finalize_workflow(object_workflow, best_accuracy)
-
-object_workflow_final
-
-```
+We now use the `last_fit()` function to construct the model using our full training set, and then fit the model to our testing set. 
 
 ```{r}
-final_res <- object_workflow_final %>% 
+final_res <- objects_workflow %>% 
   last_fit(objects_split, metrics = metric_set(accuracy, sensitivity, specificity))
 ```
 
-```{r}
-final_res_metrics <- collect_metrics(final_res)
-final_res_predictions <- collect_predictions(final_res)
-```
+The model performs extremely well on the testing set, achieving an accuracy of 96%. It correctly identifies 97% of the computing objects, and 91% of the space objects.  
 
 ```{r}
+final_res_metrics <- collect_metrics(final_res)
 final_res_metrics
 ```
 
+Now that we have our final model fit, we can also examine the importance of different variables in our model. We us this using the `vip` package, which provides functions for calculating the importance of variables across many types of machine learning algorithms. Looking at the figure below, we can see the most important variables to our model - the tf-idf scores of the words 'compute', 'rocket', 'satellite', 'scale' and 'game'. We might infer from this that descriptions which feature these words or related ones are relatively easy for our model to classify correctly.        
 
+```{r}
+library(vip)
+
+final_res %>% 
+  pluck('.workflow', 1) %>% 
+  pull_workflow_fit() %>% 
+  vip(num_features = 20)
+
+```
+
+We can also take a closer look at incorrect predictions. There's nothing in these that seems particularly striking, other than some of these contain terms that are likely to be found in both the space and computer collections, such as the description of 'Flown NASA Shuttle Main Guidance computer, IBM 1980's'. Perhaps even a human would struggle to place this in the correct collection. 
+
+```{r}
+incorrect_preds <- collect_predictions(final_res) %>% 
+  filter(.pred_class != category) %>% 
+  pull(.row)
+
+objects[incorrect_preds, ] %>% 
+  pull(description)
+  
+```
+
+In this analysis we've performed some fairly advanced techniques for analysing and modelling text data, including fitting three machine learning models to identify which collection different items from the Science Museum belonged to. The two packages we used most to do this, `tidyText` and `tidymodels`, provide intuitive and easy-to-understand interfaces to complicated areas of data analytics and machine learning. There are some great resources available on these packages, I would recommend looking at [Text Minding with R](https://www.tidytextmining.com/), [Supervised Machine Learning for Text Analysis in R](https://smltar.com/) and Julia Silge's fantastic [YouTube channel](https://www.youtube.com/channel/UCTTBgWyJl2HrrhQOOc710kA).  
+
+[^1]: This implementation of log odds accounts for the frequency of different words in each category, and so is actually a weighted log odds. There is more on the approach here: https://github.com/juliasilge/tidylo 
 
 
 

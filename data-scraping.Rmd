@@ -6,11 +6,12 @@ library(httr)
 
 ```{r}
 resp <- GET(
-  "https://collection.sciencemuseumgroup.org.uk/search/objects/categories/space-technology?&page[number]=1&page[size]=100",
+  "https://collection.sciencemuseumgroup.org.uk/search/categories/computing-&-data-processing?&page[number]=0&page[size]=100",
   add_headers(Accept = 'application/json'))
 
 resp_content <- content(resp, 'text')
 ```
+
 ```{r}
 library(jsonlite)
 
@@ -19,12 +20,12 @@ json_to_list <- fromJSON(resp_content)
 last_page <- json_to_list$links$last
 last_page_number <- str_extract(last_page, '=[0-9]*') %>% str_remove('=')
 
-pages <- seq(1, last_page_number)
+pages <- seq(0, as.numeric(last_page_number) + 1)
 ```
 
 ```{r}
 item_urls <- tibble (
-  url = map(pages, ~ str_interp("https://collection.sciencemuseumgroup.org.uk/search/objects/categories/space-technology?&page[number]=${.x}&page[size]=100"))
+  url = map(pages, ~ str_interp("https://collection.sciencemuseumgroup.org.uk/search/categories/computing-&-data-processing?&page[number]=${.x}&page[size]=100"))
 ) %>% 
   unnest(url)
 
